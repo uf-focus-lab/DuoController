@@ -1,0 +1,18 @@
+(version 1)
+# V0.1 clearance rules (lib/rules.py, owner 2026-10-07)
+(rule "tht_pad_to_track"
+	(constraint clearance (min 0.4mm))
+	(condition "A.Type == 'Pad' && A.Pad_Type == 'Through-hole' && (B.Type == 'Track' || B.Type == 'Via')"))
+(rule "tht_pad_to_power_track"
+	(constraint clearance (min 0.5mm))
+	(condition "A.Type == 'Pad' && A.Pad_Type == 'Through-hole' && (B.Type == 'Track' || B.Type == 'Via') && (B.NetName == '+5V' || B.NetName == '+3V3')"))
+(rule "power_track_to_track"
+	(constraint clearance (min 0.4mm))
+	(condition "A.Type == 'Track' && B.Type == 'Track' && (A.NetName == '+5V' || A.NetName == '+3V3') && B.NetName != 'GND'"))
+(rule "pad_to_pour"
+	(constraint clearance (min 0.4mm))
+	(condition "A.Type == 'Pad' && B.Type == 'Zone'"))
+# JLCPCB (J-CAP): NPTH >= 0.5 mm
+(rule "npth_min"
+	(constraint hole_size (min 0.5mm))
+	(condition "A.Type == 'Pad' && A.Pad_Type == 'NPTH, mechanical'"))

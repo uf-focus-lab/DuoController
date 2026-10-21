@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Run KiCad's command-line tool or KiCad's Python with the noise filtered.
+#
+#   tools/kicli cli <kicad-cli args...>   kicad-cli
+#   tools/kicli py  <python args...>      Python 3 with KiCad's pcbnew module
+#   tools/kicli env                       print the environment it sets up
+#
+# The ONE place that knows where KiCad lives and what its noise looks like:
+# - macOS: puts the app bundle's Python and kicad-cli first on PATH when
+#   /Applications/KiCad/KiCad.app exists (override with KICAD_APP=...).
+# - KICAD_3DMODEL_DIR: KiCad's stock 3D models (the Linux package, else the
+#   macOS bundle) unless already set; exported with KICAD6..10_3DMODEL_DIR so
+#   every footprint library generation resolves its models.
+# - drops wx debug lines, wx assertion spam ("assert ... failed in ..."),
+#   property warnings from stdout and stderr (merged), and
+#   keeps the command's exit status.
+# Everything else (tools/*.py, the Makefile, CI) calls KiCad through this.
+set -u
+
+app="${KICAD_APP:-/Applications/KiCad/KiCad.app}"
+if [ -d "$app" ]; then
+  PATH="$app/Contents/Frameworks/Python.framework/Versions/Current/bin:$app/Contents/MacOS:$PATH"
+  : "${KICAD_3DMODEL_DIR:=$app/Contents/SharedSupport/3dmodels}"
+fi
+for d in /usr/share/kicad/3dmodels /usr/local/share/kicad/3dmodels; do
+  [ -z "${KICAD_3DMODEL_DIR:-}" ] && [ -d "$d" ] && KICAD_3DMODEL_DIR="$d"
+done
+export PATH KICAD_3DMODEL_DIR="${KICAD_3DMODEL_DIR:-/usr/share/kicad/3dmodels}"
+for v in 6 7 8 9 10; do export "KICAD${v}_3DMODEL_DIR=$KICAD_3DMODEL_DIR"; done
+# KiCad's Python must not pick up a user site or a stray PYTHONHOME
+unset PYTHONHOME
+
+NOISE='PROPERTY|Debug: |m_choices|assert .* failed in '
+
+filter() {
+  "$@" 2>&1 | grep --line-buffered -v -E "$NOISE"
+  return "${PIPESTATUS[0]}"
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  cli) filter kicad-cli "$@" ;;
+  py)  filter python3 "$@" ;;
+  env) echo "PATH=$PATH"; echo "KICAD_3DMODEL_DIR=$KICAD_3DMODEL_DIR"
+       command -v kicad-cli python3 ;;
+  *)   echo "usage: tools/kicli cli|py|env [args...]" >&2; exit 2 ;;
+esac

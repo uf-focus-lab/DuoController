@@ -1,0 +1,17 @@
+{
+  "name": "foveacam-duo-site",
+  "private": true,
+  "description": "The FoveaCam Duo Driver board viewer: KiView with the order-package fab hook (kiview.config.mjs; published by .github/workflows/publish.yml).",
+  "type": "module",
+  "scripts": {
+    "build": "kiview build .. -c site/kiview.config.mjs",
+    "preview": "kiview preview .. -c site/kiview.config.mjs --host all --port 8083",
+    "dev": "kiview dev .. -c site/kiview.config.mjs --host all --port 8082"
+  },
+  "devDependencies": {
+    "@zdv/kiview": "0.1.2"
+  },
+  "engines": {
+    "node": ">=22.14"
+  }
+}

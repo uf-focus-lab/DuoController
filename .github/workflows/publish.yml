@@ -1,0 +1,174 @@
+# Checks the board on every push and pull request, builds the board viewer with
+# KiView (@zdv/kiview from npm: site/package.json, site/kiview.config.mjs) and
+# publishes it to GitHub Pages (owner, 2026-10-21: GitHub Pages, no Cloudflare),
+# at https://<owner>.github.io/<repository>/.
+#
+# Everything KiCad runs inside the official KiCad 10 image (the -full variant
+# carries the 3D model library); the deploy job runs on a plain runner.
+#
+# Setup, once: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+
+name: Publish
+
+# check: every push and pull request.  build and deploy: every push to master
+# (every commit goes live; owner, 2026-10-21) and manual runs.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container:
+      # pinned to the KiCad that generates the committed files (10.0.6): the moving
+      # 10.0-full tag became 10.0.7 on 2026-10-18 and writes them differently
+      image: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+      options: --user root
+    steps:
+      - name: Tools the image lacks (git for the diff, make)
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git make ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Install the silk font (board text is TrueType Roboto Slab; lib/fonts/README.md)
+        shell: bash
+        run: |
+          mkdir -p /usr/local/share/fonts/project
+          cp lib/fonts/*.ttf /usr/local/share/fonts/project/
+          command -v fc-cache >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends fontconfig; }
+          fc-cache -f >/dev/null
+          # no pipe into grep -q: under the step's pipefail, fc-list dies of SIGPIPE and the check fails
+          [ -n "$(fc-list 'Roboto Slab' family)" ] || { echo 'Roboto Slab not visible to fontconfig'; exit 1; }
+
+      - name: Environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          tools/kicli env
+          tools/kicli py -c 'import pcbnew; print("pcbnew", pcbnew.Version())'
+
+      # Regenerate everything from the Python sources (generators that do not
+      # exist yet are skipped by the Makefile) and require the committed
+      # generated files to be exactly what the generators write; only the
+      # TrueType glyph outlines in the board file may differ (Linux FreeType,
+      # tools/check_regen.py).
+      - name: Regenerate (make -B layout)
+        shell: bash
+        run: make -B layout
+
+      - name: Committed generated files are current
+        shell: bash
+        run: python3 tools/check_regen.py
+
+      # ERC, DRC, track tidiness, DFM (FAB profile), 3D-model check; one line
+      # each, the failing items under a failing line
+      - name: Checks (tools/checks.py all)
+        shell: bash
+        run: tools/kicli py tools/checks.py all
+
+  build:
+    needs: check
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      # pinned to the KiCad that generates the committed files (10.0.6): the moving
+      # 10.0-full tag became 10.0.7 on 2026-10-18 and writes them differently
+      image: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+      # the image runs as "kicad" (uid 1000), but the runner mounts the workspace and
+      # $HOME owned by uid 1001 and the JavaScript actions write there (KiView docs/ci.md)
+      options: --user root
+    steps:
+      - name: Tools in the image (git for revision info, Xvfb for pcb render)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git xvfb xauth ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # the board card shows the tag / commit
+
+      - name: Git safe directory (workspace owned by the runner user, job runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install the silk font (board text is TrueType Roboto Slab; lib/fonts/README.md)
+        shell: bash
+        run: |
+          mkdir -p /usr/local/share/fonts/project
+          cp lib/fonts/*.ttf /usr/local/share/fonts/project/
+          command -v fc-cache >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends fontconfig; }
+          fc-cache -f >/dev/null
+          # no pipe into grep -q: under the step's pipefail, fc-list dies of SIGPIPE and the check fails
+          [ -n "$(fc-list 'Roboto Slab' family)" ] || { echo 'Roboto Slab not visible to fontconfig'; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: KiCad and Python with pcbnew
+        shell: bash
+        run: |
+          set -euo pipefail
+          kicad-cli version
+          ls -d /usr/share/kicad/3dmodels
+          # the fab hook runs tools/order_package.py through tools/kicli (python3 with
+          # pcbnew); without it the site still builds, with KiView's generic fab zip
+          python3 -c 'import pcbnew' || echo "::warning::python3 cannot import pcbnew; the download falls back to the generic fab bundle"
+
+      - name: Install KiView
+        working-directory: site
+        run: npm ci
+
+      # content-addressed export cache: an unchanged board is not exported again
+      - uses: actions/cache@v4
+        with:
+          path: site/.kiview/cache
+          key: kiview-${{ hashFiles('site/package-lock.json') }}-${{ github.sha }}
+          restore-keys: kiview-${{ hashFiles('site/package-lock.json') }}-
+
+      - name: Build the site
+        # `kicad-cli pcb render` (card thumbnail) draws with OpenGL: run under Xvfb.
+        # A project site lives under /<repository>/; GitHub Pages has no SPA
+        # fallback (_redirects), so 404.html is the app too and routes deep links.
+        run: |
+          xvfb-run -a site/node_modules/.bin/kiview build . -c site/kiview.config.mjs \
+            --base "/${{ github.event.repository.name }}/"
+          cp site/.kiview/dist/index.html site/.kiview/dist/404.html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: site/.kiview/dist
+          if-no-files-found: error
+
+  deploy:
+    needs: build    # runs whenever build does
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
